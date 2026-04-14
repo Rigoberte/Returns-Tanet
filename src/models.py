@@ -27,6 +27,11 @@ class SiteInfo:
     id_ubicacion: str
     protocol: str
     site_number: str
+    nomdomicilio: str = ""
+    calle: str = ""
+    localidad: str = ""
+    nomprovincia: str = ""
+    nompais: str = ""
     raw_data: Dict[str, Any] = field(default_factory=dict)
     
     @classmethod
@@ -36,6 +41,11 @@ class SiteInfo:
             id_ubicacion=str(data.get('idubicacion', '')),
             protocol=str(data.get('nomlinea', '')),
             site_number=str(data.get('site', '')),
+            nomdomicilio=str(data.get('nomdomicilio', '')),
+            calle=str(data.get('calle', '')),
+            localidad=str(data.get('localidad', '')),
+            nomprovincia=str(data.get('nomprovincia', '')),
+            nompais=str(data.get('nompais', '')),
             raw_data=dict(data)
         )
 
