@@ -18,6 +18,7 @@ class OrderStatus(Enum):
     """Estado de una orden en el flujo de confirmación."""
     PENDING = "pending"
     CONFIRMED = "confirmed"
+    PROCESSED = "processed"
     DISCARDED = "discarded"
 
 
@@ -70,6 +71,7 @@ class Order:
     _status: OrderStatus = field(default=OrderStatus.PENDING, repr=False)
     _matches: List[MatchResult] = field(default_factory=list, repr=False)
     _selected_match: Optional[MatchResult] = field(default=None, repr=False)
+    _tracking_number: str = field(default="", repr=False)
     
     @property
     def status(self) -> OrderStatus:
@@ -82,6 +84,18 @@ class Order:
     @property
     def selected_match(self) -> Optional[MatchResult]:
         return self._selected_match
+
+    @property
+    def confirmed_site_id(self) -> str:
+        """Devuelve el id_ubicacion de la coincidencia confirmada, si existe."""
+        if not self._selected_match:
+            return ""
+        return self._selected_match.site_info.id_ubicacion
+
+    @property
+    def tracking_number(self) -> str:
+        """Devuelve el tracking number generado al crear el retorno en TANET."""
+        return self._tracking_number
     
     @property
     def match_status(self) -> MatchStatus:
@@ -104,6 +118,10 @@ class Order:
     @property
     def is_discarded(self) -> bool:
         return self._status == OrderStatus.DISCARDED
+
+    @property
+    def is_processed(self) -> bool:
+        return self._status == OrderStatus.PROCESSED
     
     @property
     def is_pending(self) -> bool:
@@ -118,8 +136,9 @@ class ProcessingSummary:
     single_matches: int
     multiple_matches: int
     confirmed: int
+    processed: int
     discarded: int
     
     @property
     def pending(self) -> int:
-        return self.total_orders - self.confirmed - self.discarded
+        return self.total_orders - self.confirmed - self.processed - self.discarded

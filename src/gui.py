@@ -15,11 +15,9 @@ from datetime import datetime
 import customtkinter as ctk
 from PIL import Image, ImageDraw, ImageOps
 
-from src.tanet import Tanet
-from src.excel_manager import ExcelManager
-from src.services import OrderService
+from src.services import OrderService, WorkflowService
 from src.models import SiteInfo, MatchStatus
-from src.exporters import export_orders_to_excel
+from src.exporters import export_orders_to_excel, export_processed_rows_to_excel
 
 
 # -----------------------------
@@ -156,6 +154,8 @@ def get_entrega_text(extra):
 
 
 def get_order_status_meta(order):
+    if order.is_processed:
+        return "Procesada", "#E8FFF2", "#047857"
     if order.is_confirmed:
         return "Confirmada", SUCCESS_BG, SUCCESS
     if order.is_discarded:
@@ -463,9 +463,10 @@ class MatchCard(ctk.CTkFrame):
 # Login
 # -----------------------------
 class LoginFrame(ctk.CTkFrame):
-    def __init__(self, parent, on_login_success):
+    def __init__(self, parent, on_login_success, workflow_service: WorkflowService):
         super().__init__(parent, fg_color="transparent")
         self.on_login_success = on_login_success
+        self.workflow = workflow_service
         self._build()
 
     def _build(self):
@@ -548,13 +549,11 @@ class LoginFrame(ctk.CTkFrame):
 
     def _login_thread(self, username, password):
         try:
-            tanet = Tanet()
-            tanet.login(username, password)
-            df = tanet.load_site_data()
-            sites = [SiteInfo.from_dict(row.to_dict()) for _, row in df.iterrows()]
+            sites = self.workflow.login_and_load_sites(username, password)
             self.after(0, lambda: self._login_success(sites))
         except Exception as e:
-            self.after(0, lambda: self._login_error(str(e)))
+            error_msg = str(e)
+            self.after(0, lambda msg=error_msg: self._login_error(msg))
 
     def _login_success(self, sites):
         self.progress.stop()
@@ -566,19 +565,20 @@ class LoginFrame(ctk.CTkFrame):
         self.progress.stop()
         self.progress.grid_remove()
         self.login_btn.configure(state="normal")
-        self._set_status(f"Error: {error}", DANGER)
-        messagebox.showerror("Error", f"No se pudo conectar:\n{error}")
+        self._set_status(f"Login no exitoso: {error}", DANGER)
+        messagebox.showerror("Login no exitoso", f"No se pudo iniciar sesión:\n{error}")
 
 
 # -----------------------------
 # Pantalla principal
 # -----------------------------
 class OrdersFrame(ctk.CTkFrame):
-    def __init__(self, parent, sites):
+    def __init__(self, parent, sites, workflow_service: WorkflowService):
         super().__init__(parent, fg_color="transparent")
         self.sites = sites
+        self.workflow = workflow_service
         self.service = None
-        self.excel_manager = ExcelManager()
+        self.processing_confirmed = False
 
         self.current_order = None
         self.current_order_id = None
@@ -629,6 +629,18 @@ class OrdersFrame(ctk.CTkFrame):
             state="disabled"
         )
         self.export_btn.pack(side="left")
+
+        self.process_confirmed_btn = ctk.CTkButton(
+            actions,
+            text="Procesar confirmadas",
+            height=42,
+            corner_radius=14,
+            fg_color="#0C4A6E",
+            hover_color="#075985",
+            command=self._process_confirmed_orders,
+            state="disabled"
+        )
+        self.process_confirmed_btn.pack(side="left", padx=(10, 0))
 
         self.status_pill = ctk.CTkLabel(
             self,
@@ -940,6 +952,7 @@ class OrdersFrame(ctk.CTkFrame):
             self.confirmed_card.set_value(0)
             self.discarded_card.set_value(0)
             self.export_btn.configure(state="disabled")
+            self.process_confirmed_btn.configure(state="disabled")
             return
 
         summary = self.service.get_summary()
@@ -948,6 +961,8 @@ class OrdersFrame(ctk.CTkFrame):
         self.confirmed_card.set_value(summary.confirmed)
         self.discarded_card.set_value(summary.discarded)
         self.export_btn.configure(state="normal" if summary.confirmed > 0 else "disabled")
+        process_state = "normal" if summary.confirmed > 0 and not self.processing_confirmed else "disabled"
+        self.process_confirmed_btn.configure(state=process_state)
 
     # -----------------------------
     # Órdenes
@@ -1163,8 +1178,7 @@ class OrdersFrame(ctk.CTkFrame):
         self._set_status("Creando plantilla Excel...", "info")
 
         try:
-            self.excel_manager.create_template()
-            self.excel_manager.open_excel()
+            self.workflow.create_and_open_excel_template()
             self._set_status("Completá el Excel y cerralo para continuar.", "warning")
             thread = threading.Thread(target=self._wait_excel_close, daemon=True)
             thread.start()
@@ -1174,7 +1188,7 @@ class OrdersFrame(ctk.CTkFrame):
             messagebox.showerror("Error", f"No se pudo abrir el Excel:\n{e}")
 
     def _wait_excel_close(self):
-        closed = self.excel_manager.wait_for_excel_close()
+        closed = self.workflow.wait_for_excel_close()
         self.after(0, lambda: self._on_excel_closed(closed))
 
     def _on_excel_closed(self, closed):
@@ -1184,7 +1198,7 @@ class OrdersFrame(ctk.CTkFrame):
             return
 
         try:
-            orders = self.excel_manager.read_orders_as_models()
+            orders = self.workflow.read_orders_from_excel()
         except Exception as e:
             self.open_excel_btn.configure(state="normal")
             self._set_status("Error leyendo el Excel.", "danger")
@@ -1309,6 +1323,59 @@ class OrdersFrame(ctk.CTkFrame):
             self._set_status("Error al exportar.", "danger")
             messagebox.showerror("Error", f"Error al exportar:\n{e}")
 
+    def _process_confirmed_orders(self):
+        if not self.service or self.processing_confirmed:
+            return
+
+        confirmed = self.service.get_confirmed_orders()
+        if not confirmed:
+            messagebox.showinfo("Info", "No hay órdenes confirmadas para procesar.")
+            return
+
+        self.processing_confirmed = True
+        self.process_confirmed_btn.configure(state="disabled")
+        self.open_excel_btn.configure(state="disabled")
+        self.export_btn.configure(state="disabled")
+        self._set_status(f"Procesando {len(confirmed)} órdenes confirmadas en TANET...", "info")
+
+        thread = threading.Thread(target=self._process_confirmed_orders_thread, daemon=True)
+        thread.start()
+
+    def _process_confirmed_orders_thread(self):
+        rows_to_export, errors = self.workflow.process_confirmed_orders(self.service)
+
+        output_path = ""
+        if rows_to_export:
+            downloads_dir = os.path.join(os.path.expanduser("~"), "Downloads")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_path = os.path.join(downloads_dir, f"returns_processed_{timestamp}.xlsx")
+            export_processed_rows_to_excel(rows_to_export, output_path)
+
+        self.after(0, lambda: self._on_process_confirmed_finished(rows_to_export, errors, output_path))
+
+    def _on_process_confirmed_finished(self, rows_to_export, errors, output_path):
+        self.processing_confirmed = False
+        self.open_excel_btn.configure(state="normal")
+        self._update_summary()
+
+        if rows_to_export and not errors:
+            self._set_status("Órdenes procesadas y exportadas correctamente.", "success")
+            messagebox.showinfo("Éxito", f"Procesadas: {len(rows_to_export)}\nExportado: {output_path}")
+            return
+
+        if rows_to_export and errors:
+            self._set_status("Procesamiento parcial completado.", "warning")
+            details = "\n".join(errors)
+            messagebox.showwarning(
+                "Procesamiento parcial",
+                f"Procesadas: {len(rows_to_export)}\nExportado: {output_path}\n\nErrores:\n{details}"
+            )
+            return
+
+        self._set_status("No se pudo procesar ninguna orden confirmada.", "danger")
+        details = "\n".join(errors) if errors else "Sin detalle de errores."
+        messagebox.showerror("Error", f"No se generó el archivo.\n\n{details}")
+
 
 # -----------------------------
 # App principal
@@ -1316,6 +1383,8 @@ class OrdersFrame(ctk.CTkFrame):
 class Application(ctk.CTk):
     def __init__(self):
         super().__init__()
+
+        self.workflow = WorkflowService()
 
         self.title("Returns · TANET")
         self.geometry("1500x900")
@@ -1343,12 +1412,12 @@ class Application(ctk.CTk):
 
     def _show_login(self):
         self._clear_container()
-        login = LoginFrame(self.container, self._on_login_success)
+        login = LoginFrame(self.container, self._on_login_success, self.workflow)
         login.pack(fill="both", expand=True, padx=20, pady=20)
 
     def _on_login_success(self, sites):
         self._clear_container()
-        orders_frame = OrdersFrame(self.container, sites)
+        orders_frame = OrdersFrame(self.container, sites, self.workflow)
         orders_frame.pack(fill="both", expand=True, padx=6, pady=6)
 
 

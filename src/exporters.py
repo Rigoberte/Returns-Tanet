@@ -28,6 +28,17 @@ def export_orders_to_excel(orders: List[Order], output_path: str) -> str:
     return output_path
 
 
+def export_processed_rows_to_excel(rows: List[Dict[str, Any]], output_path: str) -> str:
+    """Exporta filas procesadas (incluyendo Tracking Number) a un archivo Excel."""
+    if not rows:
+        return ""
+
+    df = pd.DataFrame(rows)
+    df.to_excel(output_path, index=False)
+
+    return output_path
+
+
 def _order_to_dict(order: Order) -> Dict[str, Any]:
     """Convierte una orden a diccionario para exportación."""
     row = {
